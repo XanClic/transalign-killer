@@ -6,6 +6,7 @@
 
 #include "common.h"
 
+// See common.h for documentation
 cl_device_id select_device(int argc, char *argv[])
 {
     struct dev_info
