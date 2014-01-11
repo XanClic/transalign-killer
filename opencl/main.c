@@ -14,12 +14,12 @@
  * step, two input fields are added and the size shrinks to half of what it was
  * before. This influences the size of the result buffer as well (the greater
  * this exponent is, the smaller the result will be). */
-#define BASE_EXP 1
+#define BASE_EXP 4
 #define BASE (1 << BASE_EXP)
 
 /* Define this to actually use host memory instead of copying the buffer to the
  * GPU (as it turns out, this may actually be worth it) */
-// #define USE_HOST_PTR
+#define USE_HOST_PTR
 
 
 #ifdef USE_HOST_PTR
@@ -57,15 +57,9 @@ static long round_up_to_power_of_two(long x, int exp)
 
 
 /**
- * Loads a text file and returns a buffer with the contents. If length_ptr is
- * not NULL, the buffer length (in memory!) is stored there. If round_exp is 0,
- * the buffer length will be the file length + 1; if it is greater than 0,
- * round_up_to_power_of_two(file length, round_exp) will be used as the buffer
- * length. The part of the buffer behind the end of file will be set to 0.
- *
- * Therefore, setting round_exp to 0 results in a simple C string.
+ * Loads a text file and returns a buffer with the contents.
  */
-static char *load_text(const char *filename, long *length_ptr, int round_exp)
+static char *load_text(const char *filename, long *length_ptr)
 {
     FILE *fp = fopen(filename, "r");
     if (!fp)
@@ -78,7 +72,7 @@ static char *load_text(const char *filename, long *length_ptr, int round_exp)
     long length = ftell(fp);
     rewind(fp);
 
-    long mem_len = round_exp ? round_up_to_power_of_two(length, round_exp) : length + 1;
+    long mem_len = length + 1;
 
     if (length_ptr)
         *length_ptr = mem_len;
@@ -105,9 +99,19 @@ int main(int argc, char *argv[])
 
 
     long seq_length;
-    char *sequence = load_text(argv[argc - 1], &seq_length, BASE_EXP);
+    char *sequence = load_text(argv[argc - 1], &seq_length);
     if (!sequence)
         return 1;
+
+    seq_length--; // Cut final 0 byte
+
+    // FIXME: All the following code relies on seq_length being a multiple of BASE.
+
+    long round_seq_length = round_up_to_power_of_two(seq_length, BASE_EXP);
+
+    long res_length = 0;
+    for (long len = round_seq_length / BASE; len; len /= BASE)
+        res_length += len;
 
 
     // Use some random index to be searched for here
@@ -124,7 +128,7 @@ int main(int argc, char *argv[])
     cl_command_queue queue = clCreateCommandQueue(ctx, dev, 0, NULL);
 
     // Load the OpenCL kernesl
-    char *prog_src = load_text("trans.cl", NULL, 0);
+    char *prog_src = load_text("trans.cl", NULL);
     if (!prog_src)
         return 1;
     cl_program prog = clCreateProgramWithSource(ctx, 1, (const char **)&prog_src, NULL, NULL);
@@ -139,8 +143,8 @@ int main(int argc, char *argv[])
 
 
     // Create the result buffer
-    unsigned *result = malloc(seq_length * sizeof(unsigned));
-    cl_mem result_gpu = clCreateBuffer(ctx, CL_MEM_READ_WRITE | HOST_PTR_POLICY, seq_length * sizeof(unsigned), result, NULL);
+    unsigned *result = malloc(res_length * sizeof(unsigned));
+    cl_mem result_gpu = clCreateBuffer(ctx, CL_MEM_READ_WRITE | HOST_PTR_POLICY, res_length * sizeof(unsigned), result, NULL);
 
 
     clock_start();
@@ -164,9 +168,12 @@ int main(int argc, char *argv[])
      */
     clSetKernelArg(k_iadd, 0, sizeof(result_gpu), &result_gpu);
     clSetKernelArg(k_iadd, 1, sizeof(seq_gpu), &seq_gpu);
-    clEnqueueNDRangeKernel(queue, k_iadd, 1, NULL, &(size_t){seq_length / BASE}, NULL, 0, NULL, NULL);
+    clSetKernelArg(k_iadd, 2, sizeof(unsigned), &(unsigned){seq_length});
+    clEnqueueNDRangeKernel(queue, k_iadd, 1, NULL, &(size_t){round_seq_length / BASE}, NULL, 0, NULL, NULL);
 
-    for (unsigned kernels = seq_length / (BASE * BASE); kernels > 0; kernels /= BASE)
+    unsigned input_offset = 0, output_offset = round_seq_length / BASE;
+
+    for (unsigned kernels = round_seq_length / (BASE * BASE); kernels > 0; kernels /= BASE)
     {
         /**
          * Then, do this addition recursively until there is only one kernel
@@ -174,10 +181,13 @@ int main(int argc, char *argv[])
          * characters.
          */
         clSetKernelArg(k_cadd, 0, sizeof(result_gpu), &result_gpu);
-        clSetKernelArg(k_cadd, 1, sizeof(unsigned), &(unsigned){seq_length - kernels * BASE});
-        clSetKernelArg(k_cadd, 2, sizeof(unsigned), &(unsigned){seq_length - kernels * BASE * BASE});
+        clSetKernelArg(k_cadd, 1, sizeof(unsigned), &(unsigned){output_offset});
+        clSetKernelArg(k_cadd, 2, sizeof(unsigned), &(unsigned){ input_offset});
         clFinish(queue);
         clEnqueueNDRangeKernel(queue, k_cadd, 1, NULL, &(size_t){kernels}, NULL, 0, NULL, NULL);
+
+        input_offset = output_offset;
+        output_offset += kernels;
     }
 
     clFinish(queue);
@@ -188,16 +198,16 @@ int main(int argc, char *argv[])
     // Reverse bandwidth intensive stuff goes here
 
     // Retrieve the result buffer
-    clEnqueueReadBuffer(queue, result_gpu, true, 0, seq_length * sizeof(unsigned), result, 0, NULL, NULL);
+    clEnqueueReadBuffer(queue, result_gpu, true, 0, res_length * sizeof(unsigned), result, 0, NULL, NULL);
 
     long bw2_time = clock_delta();
 
 
     // CPU intensive stuff goes here
 
-    if (letter_index > result[seq_length - 2])
+    if (letter_index > result[res_length - 1])
     {
-        fprintf(stderr, "Logical index out of bounds (last index: %u).\n", result[seq_length - 2]);
+        fprintf(stderr, "Logical index out of bounds (last index: %u).\n", result[res_length - 1]);
         ret = 1;
         goto fail;
     }
@@ -249,36 +259,70 @@ int main(int argc, char *argv[])
      * it, therefore it returns 2 (which is the 1-based index of G in the
      * sequence buffer). I can't see it from the code, but that is what the
      * result is.
+     *
+     *
+     * For another BASE than 2, it looks like this (BASE 4):
+     *
+     *                9
+     *        //             \\
+     *    3       1       3       2
+     *  // \\   // \\   // \\   // \\
+     * A G - T C - - - C - T T A G - -
+     *
+     * Let's assume, we're looking for index 5. Compare it to 9, it's smaller,
+     * so this is the tree we're looking for. Then compare it to all subtrees:
+     * 5 is greater than 3, so go right and subtract 3 from 5. 2 is greater than
+     * 1, so go right and subtract 1 from 2. 1 then is smaller than 3, so the
+     * third subtree from the left is the one we want to enter now. The index 1
+     * here refers to the first T, therefore, it is globally the second T in the
+     * sequence.
      */
 
-    unsigned index = seq_length - 4;
-    unsigned local_index = letter_index - 1; // Turn 1-based index into 0-based.
-    while (index >= seq_length / BASE)
-    {
-        /* Is this (the left subtree) actually the correct subtree? If
-         * go_right == true, it isn't; subtract the root of the left subtree in
-         * this case and go the right one */
-        bool go_right = local_index >= result[index];
-        if (go_right)
-            local_index -= result[index];
+    // "Current level subtree starting index"; index of the first subtree sum in
+    // the current level (we skip level 0, i.e., the complete tree)
+    unsigned clstsi = res_length - 1 - BASE;
+    // "Current level subtree count"; number of subtrees in the current level
+    unsigned clstc = BASE;
+    // "Current level subtree offset"; index difference of the actual set of
+    // subtrees we're using from the first one in the current level
+    unsigned clsto = 0;
+    // Turn 1-based index into 0-based
+    unsigned local_index = letter_index - 1;
 
-        /* Great formula for determining the next index (& (seq_length - 1) is
-         * equal to % seq_length, since seq_length needs to be a power of two);
-         * don't try to understand it, it just seems to work */
-        index = ((index | go_right) << BASE_EXP) & (seq_length - 1);
+    for (;;)
+    {
+        int subtree;
+
+        // "First subtree index", index of the first subtree we're supposed to
+        // examine
+        unsigned fsti = clstsi + clsto * BASE;
+
+        // We could add a condition (subtree < BASE) to this loop, but this loop
+        // has to be left before this condition is false anyway (otherwise,
+        // something is very wrong).
+        for (subtree = 0; local_index >= result[fsti + subtree]; subtree++)
+            local_index -= result[fsti + subtree];
+
+        // And we'll check it here anyway (#ifdef NDEBUG).
+        assert(subtree < BASE);
+
+
+        clsto = clsto * BASE + subtree;
+
+        // If clstsi is 0, we were at the beginning of the result buffer and are
+        // therefore finished
+        if (!clstsi)
+            break;
+
+        clstc *= BASE;
+        clstsi -= clstc;
     }
 
     // Now we need to go to the sequence level which requires an extra step.
-    bool go_right = local_index >= result[index];
-    if (go_right)
-        local_index -= result[index];
-    assert(local_index <= 1);
-
-    index = ((index | go_right) << BASE_EXP) + local_index;
-
-    // See the comment on the local index being 0 at the sequence level above
-    if (!local_index && (!sequence[index] || (sequence[index] == '-')))
-        index++;
+    unsigned index;
+    for (index = clsto * BASE; local_index; index++)
+        if (sequence[index] != '-')
+            local_index--;
 
     /*** END OF ROCKET SCIENCE LEVEL RUNTIME-TIME INTENSIVE STUFF ***/
 
