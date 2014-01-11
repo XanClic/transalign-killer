@@ -103,8 +103,8 @@ int main(int argc, char** argv){
   if(sequence.empty())
     return 1;
 
-  unsigned lower_letter_index = 10;
-  unsigned upper_letter_index = sequence.size()-10;
+  unsigned lower_letter_index = 0;
+  unsigned upper_letter_index = sequence.size()/2;
   std::cout << "lower index: " << lower_letter_index << ", upper index: " << upper_letter_index << "\n";
   static const char search_character = '-';
   
