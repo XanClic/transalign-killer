@@ -9,13 +9,8 @@ __kernel void k_iadd(__global unsigned *dest, __global char *sequence, unsigned 
     unsigned result = 0;
 
     if (in_start < seq_length)
-    {
         for (unsigned i = in_start; i < in_start + BASE; i++)
-        {
-            char nucleobase = sequence[i];
-            result += nucleobase != '-';
-        }
-    }
+            result += sequence[i] != '-';
 
     dest[id] = result;
 }
@@ -28,13 +23,8 @@ __kernel void k_cadd(__global unsigned *buffer, unsigned doff, unsigned soff)
     unsigned out_pos = doff + id;
     unsigned result = 0;
 
-    // This seems to work, although we would have to add (i < out_pos) to the
-    // condition (but this makes everything 4 times (sic!) slower).
     for (unsigned i = in_start; i < in_start + BASE; i++)
-    {
-        unsigned value = buffer[i];
-        result += value;
-    }
+        result += buffer[i];
 
     buffer[out_pos] = result;
 }

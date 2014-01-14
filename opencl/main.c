@@ -175,7 +175,7 @@ int main(int argc, char *argv[])
 
     // Create the result buffer
     unsigned *result = malloc(res_length * sizeof(unsigned));
-    cl_mem result_gpu = clCreateBuffer(ctx, CL_MEM_READ_WRITE | HOST_PTR_POLICY, res_length * sizeof(unsigned), result, NULL);
+    cl_mem result_gpu = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, res_length * sizeof(unsigned), result, NULL);
 
 
     clock_start();
@@ -211,10 +211,25 @@ int main(int argc, char *argv[])
          * remaining which calculates the total number of non-'-' and non-'\0'
          * characters.
          */
-        clSetKernelArg(k_cadd, 1, sizeof(unsigned), &(unsigned){subtree_offsets[level]});
-        clSetKernelArg(k_cadd, 2, sizeof(unsigned), &(unsigned){subtree_offsets[level - 1]});
-        clFinish(queue);
-        clEnqueueNDRangeKernel(queue, k_cadd, 1, NULL, &(size_t){subtrees[level]}, NULL, 0, NULL, NULL);
+        if (subtrees[level] > 0)
+        {
+            clSetKernelArg(k_cadd, 1, sizeof(unsigned), &(unsigned){subtree_offsets[level]});
+            clSetKernelArg(k_cadd, 2, sizeof(unsigned), &(unsigned){subtree_offsets[level - 1]});
+            clFinish(queue);
+            clEnqueueNDRangeKernel(queue, k_cadd, 1, NULL, &(size_t){subtrees[level] - 1}, NULL, 0, NULL, NULL);
+        }
+
+        // Execute the last kernel on the CPU
+        {
+            unsigned in_start = subtree_offsets[level - 1] + ((subtrees[level] - 1) << BASE_EXP);
+            unsigned out_pos = subtree_offsets[level] + subtrees[level] - 1;
+            unsigned result_val = 0;
+
+            for (unsigned i = in_start; i < subtree_offsets[level]; i++)
+                result_val += result[i];
+
+            result[out_pos] = result_val;
+        }
     }
 
     clFinish(queue);
@@ -225,7 +240,8 @@ int main(int argc, char *argv[])
     // Reverse bandwidth intensive stuff goes here
 
     // Retrieve the result buffer
-    clEnqueueReadBuffer(queue, result_gpu, true, 0, res_length * sizeof(unsigned), result, 0, NULL, NULL);
+    // clEnqueueReadBuffer(queue, result_gpu, true, 0, res_length * sizeof(unsigned), result, 0, NULL, NULL);
+    // (No need to do that, since we're fixed on CL_MEM_USE_HOST_PTR here)
 
     long bw2_time = clock_delta();
 
