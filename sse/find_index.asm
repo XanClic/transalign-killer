@@ -10,7 +10,7 @@ compare: times 16 db '-'
 one: times 16 db 1
 
 
-section '.text' executable
+section '.text' executable align 16
 
 find_index:
 movapd  xmm8,[compare]
@@ -18,6 +18,8 @@ movapd  xmm9,[one]
 xorps   xmm10,xmm10
 xor     rdx,rdx
 mov     r8,rdi
+
+align 16
 
 find_index_loop:
 movaps  xmm0,[rdi+0x00]
