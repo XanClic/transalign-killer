@@ -28,6 +28,8 @@ __kernel void k_cadd(__global unsigned *buffer, unsigned doff, unsigned soff)
     unsigned out_pos = doff + id;
     unsigned result = 0;
 
+    // This seems to work, although we would have to add (i < out_pos) to the
+    // condition (but this makes everything 4 times (sic!) slower).
     for (unsigned i = in_start; i < in_start + BASE; i++)
     {
         unsigned value = buffer[i];
