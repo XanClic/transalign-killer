@@ -57,6 +57,21 @@ static long round_up_to_power_of_two(long x, int exp)
 
 
 /**
+ * Returns the integer logarithm to 2^exp (round down).
+ */
+static int log_pow2(long x, int exp)
+{
+    assert(x > 0);
+
+    int log;
+    for (log = -1; x; log++)
+        x >>= exp;
+
+    return log;
+}
+
+
+/**
  * Loads a text file and returns a buffer with the contents.
  */
 static char *load_text(const char *filename, long *length_ptr)
@@ -108,10 +123,26 @@ int main(int argc, char *argv[])
     // FIXME: All the following code relies on seq_length being a multiple of BASE.
 
     long round_seq_length = round_up_to_power_of_two(seq_length, BASE_EXP);
+    int levels = log_pow2(round_seq_length, BASE_EXP);
 
-    long res_length = 0;
-    for (long len = round_seq_length / BASE; len; len /= BASE)
-        res_length += len;
+
+    long subtree_offsets[levels + 1];
+    long subtrees[levels];
+    long current_offset = 0, current_subtrees = (seq_length + BASE - 1) / BASE;
+    for (int level = 0; level <= levels; level++)
+    {
+        subtree_offsets[level] = current_offset;
+
+        if (level < levels)
+            subtrees[level] = current_subtrees;
+
+        current_offset += current_subtrees;
+        current_subtrees = (current_subtrees + BASE - 1) / BASE;
+    }
+
+    assert(current_subtrees == 1);
+
+    long res_length = subtree_offsets[levels];
 
 
     // Use some random index to be searched for here
@@ -169,25 +200,21 @@ int main(int argc, char *argv[])
     clSetKernelArg(k_iadd, 0, sizeof(result_gpu), &result_gpu);
     clSetKernelArg(k_iadd, 1, sizeof(seq_gpu), &seq_gpu);
     clSetKernelArg(k_iadd, 2, sizeof(unsigned), &(unsigned){seq_length});
-    clEnqueueNDRangeKernel(queue, k_iadd, 1, NULL, &(size_t){round_seq_length / BASE}, NULL, 0, NULL, NULL);
+    clEnqueueNDRangeKernel(queue, k_iadd, 1, NULL, &(size_t){subtrees[0]}, NULL, 0, NULL, NULL);
 
-    unsigned input_offset = 0, output_offset = round_seq_length / BASE;
+    clSetKernelArg(k_cadd, 0, sizeof(result_gpu), &result_gpu);
 
-    for (unsigned kernels = round_seq_length / (BASE * BASE); kernels > 0; kernels /= BASE)
+    for (int level = 1; level < levels; level++)
     {
         /**
          * Then, do this addition recursively until there is only one kernel
          * remaining which calculates the total number of non-'-' and non-'\0'
          * characters.
          */
-        clSetKernelArg(k_cadd, 0, sizeof(result_gpu), &result_gpu);
-        clSetKernelArg(k_cadd, 1, sizeof(unsigned), &(unsigned){output_offset});
-        clSetKernelArg(k_cadd, 2, sizeof(unsigned), &(unsigned){ input_offset});
+        clSetKernelArg(k_cadd, 1, sizeof(unsigned), &(unsigned){subtree_offsets[level]});
+        clSetKernelArg(k_cadd, 2, sizeof(unsigned), &(unsigned){subtree_offsets[level - 1]});
         clFinish(queue);
-        clEnqueueNDRangeKernel(queue, k_cadd, 1, NULL, &(size_t){kernels}, NULL, 0, NULL, NULL);
-
-        input_offset = output_offset;
-        output_offset += kernels;
+        clEnqueueNDRangeKernel(queue, k_cadd, 1, NULL, &(size_t){subtrees[level]}, NULL, 0, NULL, NULL);
     }
 
     clFinish(queue);
@@ -278,11 +305,7 @@ int main(int argc, char *argv[])
      * sequence.
      */
 
-    // "Current level subtree starting index"; index of the first subtree sum in
-    // the current level (we skip level 0, i.e., the complete tree)
-    unsigned clstsi = res_length - 1 - BASE;
-    // "Current level subtree count"; number of subtrees in the current level
-    unsigned clstc = BASE;
+    int level = levels - 1;
     // "Current level subtree offset"; index difference of the actual set of
     // subtrees we're using from the first one in the current level
     unsigned clsto = 0;
@@ -295,27 +318,18 @@ int main(int argc, char *argv[])
 
         // "First subtree index", index of the first subtree we're supposed to
         // examine
-        unsigned fsti = clstsi + clsto * BASE;
+        unsigned fsti = subtree_offsets[level] + clsto * BASE;
 
-        // We could add a condition (subtree < BASE) to this loop, but this loop
-        // has to be left before this condition is false anyway (otherwise,
-        // something is very wrong).
         for (subtree = 0; local_index >= result[fsti + subtree]; subtree++)
             local_index -= result[fsti + subtree];
 
-        // And we'll check it here anyway (#ifdef NDEBUG).
-        assert(subtree < BASE);
+        assert(subtree < subtrees[level]);
 
 
         clsto = clsto * BASE + subtree;
 
-        // If clstsi is 0, we were at the beginning of the result buffer and are
-        // therefore finished
-        if (!clstsi)
+        if (!level--)
             break;
-
-        clstc *= BASE;
-        clstsi -= clstc;
     }
 
     // Now we need to go to the sequence level which requires an extra step.
