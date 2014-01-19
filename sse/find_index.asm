@@ -6,18 +6,18 @@ public find_index
 
 section '.rodata' align 16
 
-compare: times 16 db '-'
-one: times 16 db 1
+compare: times 16 db '-' ; Define 16 bytes (128bit) with the string constant -.
+one: times 16 db 1 ; Define 16 bytes (128bit) with the number 1.
 
 
 section '.text' executable align 16
 
 find_index:
-movapd  xmm8,[compare]
-movapd  xmm9,[one]
-xorps   xmm10,xmm10
-xor     rdx,rdx
-mov     r8,rdi
+movapd  xmm8,[compare] ; 128-bit register (SIMD), move - to xmm8.
+movapd  xmm9,[one] ; 128-bit register (SIMD), move 1 to xmm9.
+xorps   xmm10,xmm10 ; Bitwise logical exclusive-OR, stored in xmm10.
+xor     rdx,rdx ; Extended 32bit (64bit) register, for ints.
+mov     r8,rdi ; First 64bit general register, extended 32bit (64bit) register.
 
 align 16
 
