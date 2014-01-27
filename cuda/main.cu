@@ -4,9 +4,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <CL/cl.h>
+#include <cuda.h>
+#include <time.h>
+#include <sys/time.h>
 
-#include "common.h"
+#define DEBUG 1
+#define NGRID 512
+#define NBLOCK 65535
+#define CUDA_CHECK(cmd) {cudaError_t error = cmd; if(error!=cudaSuccess){printf("<%s>:%i ",__FILE__,__LINE__); printf("[CUDA] Error: %s\n", cudaGetErrorString(error));}}
 
 
 /* The exponent given here determines the steps taken in the adding kernel. An
@@ -28,26 +33,35 @@
 #define HOST_PTR_POLICY CL_MEM_COPY_HOST_PTR
 #endif
 
-
 /**
  * These two functions provide std::chrono functionality (see cpp-stuff.cpp for
  * an explanation why they're extern).
- */
+ CUDA nvcc don't support it.
 extern void clock_start(void);
 extern long clock_delta(void);
+*/
 
 __global__ void k_iadd(unsigned *dest, char *sequence, unsigned seq_length)
 {
-    unsigned id = blockIdx.x*blockDim.x+threadIdx.x;
-    unsigned in_start = id << BASE_EXP;
-    
-    if (in_start < seq_length)
+    for (unsigned id =  blockIdx.x*blockDim.x+threadIdx.x; 
+        id < seq_length; 
+        id += blockDim.x*gridDim.x)
     {
-        char nucleobase = sequence[i];
-        result += nucleobase != '-';
-    }
     
-    dest[id] = result;
+        unsigned result = 0;
+        unsigned in_start = id << BASE_EXP;
+
+        if (in_start < seq_length)
+        {
+            for (unsigned i = in_start; i < in_start + BASE; i++)
+            {
+                char nucleobase = sequence[i];
+                result += nucleobase != '-';
+            }
+        }
+
+        dest[id] = result;
+    }
 }
 
 __global__ void k_cadd(unsigned *buffer, unsigned doff, unsigned soff)
@@ -106,7 +120,7 @@ static char *load_text(const char *filename, long *length_ptr)
     if (length_ptr)
         *length_ptr = mem_len;
 
-    char *content = calloc(mem_len, 1);
+    char *content = (char *)calloc(mem_len, 1);
     fread(content, 1, length, fp);
     fclose(fp);
 
@@ -114,12 +128,13 @@ static char *load_text(const char *filename, long *length_ptr)
 }
 
 
-
-
 int main(int argc, char *argv[])
 {
-    int ret = 0;
-
+    dim3 grid1d(NGRID,1,1); 
+    dim3 block1d(NBLOCK,1,1);
+    unsigned clstsi, clstc, clsto, local_index;
+    long delta_time;
+    struct timeval start_time, end_time;
 
     if (argc < 2)
     {
@@ -132,8 +147,16 @@ int main(int argc, char *argv[])
     long seq_length;
     //CUDA kernel input
     char *sequence = load_text(argv[argc - 1], &seq_length);
+
     if (!sequence)
         return 1;
+//DEBUG
+    for (int i=0; i<seq_length; ++i)
+    {
+        printf("%c", sequence[i]);
+    }
+    printf("\n");
+
 
     seq_length--; // Cut final 0 byte
 
@@ -145,29 +168,38 @@ int main(int argc, char *argv[])
     for (long len = round_seq_length / BASE; len; len /= BASE)
         res_length += len;
 
+    printf("res_length: %d\n", res_length);
 
     // Use some random index to be searched for here
     unsigned letter_index = seq_length / 2;
 
-
-
     // Create the result buffer
     // CUDA kernel output
-    unsigned *result = malloc(res_length * sizeof(unsigned));
+    unsigned *result = (unsigned *)malloc(res_length * sizeof(unsigned));
+    unsigned *result_gpu;
+    char *seq_gpu;
 
-    clock_start();
+    //replace clock_start(); with gettimeofday()
+    gettimeofday(&start_time, NULL);
 
-
+#if DEBUG
+    printf("GPU part started\n");
+#endif
     /*** START OF ROCKET SCIENCE LEVEL RUNTIME-TIME INTENSIVE STUFF ***/
 
     // Bandwidth intensive stuff goes here
     // Copy the sequence to the video memory (or, generally speaking, the OpenCL device)
-    cudaMalloc(result_gpu, res_length * sizeof(unsigned));//result_gpu
-    cudaMalloc(seq_gpu, seq_length*sizeof(unsigned));//seq_gpu
-    cudaMemcpy(seq_gpu, sequence, res_length * sizeof(unsigned), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMalloc((void**)&result_gpu, res_length * sizeof(unsigned)));//result_gpu
+    CUDA_CHECK(cudaMalloc((void**)&seq_gpu, seq_length*sizeof(char)));//seq_gpu
+    CUDA_CHECK(cudaMemcpy(seq_gpu, sequence, res_length * sizeof(char), cudaMemcpyHostToDevice));
 
-    long bw1_time = clock_delta();
+#if DEBUG
+    printf("GPU malloc and cpy finised\n");
+#endif
 
+    //replace clock_delta(); with gettimeofday()
+    gettimeofday(&end_time, NULL);
+    long bw1_time = (end_time.tv_sec*1000000+end_time.tv_usec) - (start_time.tv_sec*1000000+start_time.tv_usec);
 
     // GPU intensive stuff goes here
 
@@ -177,14 +209,36 @@ int main(int argc, char *argv[])
      * the beginning of the result buffer.
      */
     
-    unsigned *result_gpu;
-
     //TODO: ADD correct kernel parameters
-    k_iadd<<<,>>>(result_gpu, seq_gpu, seq_length);
-    cudaMemcpy(result, result_gpu, res_length * sizeof(unsigned), cudaMemcpyDeviceToHost);
+#if DEBUG
+    printf("k_iadd launching\n");
+#endif
+
+    k_iadd<<<grid1d,block1d>>>(result_gpu, seq_gpu, seq_length);
+
+#if DEBUG
+    printf("k_iadd finished\n");
+#endif
+
+    CUDA_CHECK(cudaMemcpy(result, result_gpu, res_length * sizeof(unsigned), cudaMemcpyDeviceToHost));
+#if DEBUG
+    printf("result back\n");
+    for (int i = 0; i < res_length; i++)
+    {
+        printf("%d ", result[i]);
+    }
+    printf("\n");
+#endif
+
+#if DEBUG
+    printf("k_iadd result back\n");
+#endif
     unsigned input_offset = 0, output_offset = round_seq_length / BASE;
 
-    cudaMemcpy(result_gpu, result, res_length * sizeof(unsigned), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(result_gpu, result, res_length * sizeof(unsigned), cudaMemcpyHostToDevice));
+#if DEBUG
+    printf("k_cadd loop start\n");
+#endif
     for (unsigned kernels = round_seq_length / (BASE * BASE); kernels > 0; kernels /= BASE)
     {
         /**
@@ -193,39 +247,59 @@ int main(int argc, char *argv[])
          * characters.
          */
         //TODO: ADD correct kernel parameters
-        
-        k_cadd<<<,>>>(result_gpu, output_offset, input_offset);
+#if DEBUG
+    printf("k_cadd loop %d\n", kernels);
+#endif
+        k_cadd<<<grid1d,block1d>>>(result_gpu, output_offset, input_offset);
         
         input_offset = output_offset;
         output_offset += kernels;
     }
-    
-    // Retrieve the result buffer    
-    cudaMemcpy(result, result_gpu, res_length * sizeof(unsigned), cudaMemcpyDeviceToHost);
+ #if DEBUG
+    printf("k_cadd loop end\n");
+#endif   
+    // Retrieve the result buffer 
 
+ #if DEBUG
+    printf("k_cadd loop end\n");
+#endif   
+    CUDA_CHECK(cudaMemcpy(result, result_gpu, res_length * sizeof(unsigned), cudaMemcpyDeviceToHost));
+ #if DEBUG
+    printf("k_cadd loop end\n");
+#endif
 
-    long gpu_time = clock_delta();
+    gettimeofday(&end_time, NULL);
+    long gpu_time = (end_time.tv_sec*1000000+end_time.tv_usec) - (start_time.tv_sec*1000000+start_time.tv_usec);
 
     // Reverse bandwidth intensive stuff goes here
 
-
-    long bw2_time = clock_delta();
+    gettimeofday(&end_time, NULL);
+    long bw2_time = (end_time.tv_sec*1000000+end_time.tv_usec) - (start_time.tv_sec*1000000+start_time.tv_usec);
 
 
     // CPU intensive stuff goes here
-
+#if DEBUG
+    printf("cpu part start\n");
+    for (int i=0; i<res_length; ++i)
+    {
+        printf("%d ", result[i]);
+    }
+    printf("\n");
+#endif
     if (letter_index > result[res_length - 1])
     {
         fprintf(stderr, "Logical index out of bounds (last index: %u).\n", result[res_length - 1]);
-        ret = 1;
-        goto fail;
+	CUDA_CHECK(cudaFree(result_gpu));
+    	CUDA_CHECK(cudaFree(seq_gpu));
+	exit(-1);
     }
 
     if (!letter_index)
     {
         fprintf(stderr, "Please used 1-based indexing (for whatever reason).\n");
-        ret = 1;
-        goto fail;
+	CUDA_CHECK(cudaFree(result_gpu));
+	CUDA_CHECK(cudaFree(seq_gpu));
+	exit(-1);
     }
 
     /**
@@ -289,14 +363,14 @@ int main(int argc, char *argv[])
 
     // "Current level subtree starting index"; index of the first subtree sum in
     // the current level (we skip level 0, i.e., the complete tree)
-    unsigned clstsi = res_length - 1 - BASE;
+    clstsi = res_length - 1 - BASE;
     // "Current level subtree count"; number of subtrees in the current level
-    unsigned clstc = BASE;
+    clstc = BASE;
     // "Current level subtree offset"; index difference of the actual set of
     // subtrees we're using from the first one in the current level
-    unsigned clsto = 0;
+    clsto = 0;
     // Turn 1-based index into 0-based
-    unsigned local_index = letter_index - 1;
+    local_index = letter_index - 1;
 
     for (;;)
     {
@@ -335,7 +409,9 @@ int main(int argc, char *argv[])
 
     /*** END OF ROCKET SCIENCE LEVEL RUNTIME-TIME INTENSIVE STUFF ***/
 
-    long delta_time = clock_delta();
+    //replace with gettimeofday for CUDA
+    gettimeofday(&end_time, NULL);
+    delta_time = (end_time.tv_sec*1000000+end_time.tv_usec) - (start_time.tv_sec*1000000+start_time.tv_usec);
     printf("%li us elapsed total\n", delta_time);
     printf(" - %li us on bandwidth forth\n", bw1_time);
     printf(" - %li us on GPU\n", gpu_time - bw1_time);
@@ -346,16 +422,9 @@ int main(int argc, char *argv[])
     printf("cnt = %u (index + 1)\n", index + 1);
 
 
-fail:
-    free(sequence);
-    free(result);
+    //free resource
+    CUDA_CHECK(cudaFree(result_gpu));
+    CUDA_CHECK(cudaFree(seq_gpu));
 
-    clReleaseMemObject(result_gpu);
-    clReleaseMemObject(seq_gpu);
-    clReleaseKernel(k_iadd);
-    clReleaseProgram(prog);
-    clReleaseCommandQueue(queue);
-    clReleaseContext(ctx);
-
-    return ret;
+    return 0;
 }
