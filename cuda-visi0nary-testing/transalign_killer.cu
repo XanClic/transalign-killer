@@ -1,6 +1,9 @@
 #include <iostream>
 #include <fstream>
 #include <string>
+#include <cuda.h>
+#include <time.h>
+#include <sys/time.h>
 
 #define DIMX 10
 #define DIMY 10
@@ -99,6 +102,12 @@ std::string get_file_contents(const char *filename)
 
 
 int main(int argc, char** argv){
+  
+  long delta_time;
+  struct timeval start_time, end_time;
+
+  //set a starting point
+  gettimeofday(&start_time, NULL);
 
   if(argc!=2){
     print_help();
@@ -127,7 +136,6 @@ int main(int argc, char** argv){
   int iPart = static_cast<int>(integerPart);
   int *host_subSequenceLength = &iPart;
 
-  printf("Subsequence_Length %i \n", *host_subSequenceLength);
 
   unsigned *host_searchedBound=(unsigned*) malloc(sizeof(unsigned));
   *host_searchedBound=seq.size()/2;
@@ -147,23 +155,33 @@ int main(int argc, char** argv){
 
   /**start GPU stuff**/
   dim3 block(DIMX, DIMY, DIMZ);
+
   CUDA_CHECK(cudaMalloc((void**)&dev_result, sizeof(unsigned)));
   CUDA_CHECK(cudaMalloc((void**)&dev_subSequenceLength, sizeof(unsigned)));
   CUDA_CHECK(cudaMalloc((void**)&dev_searchedBound, sizeof(unsigned)));
   CUDA_CHECK(cudaMalloc((void**)&dev_sequence, seq.size()*sizeof(char)));
   CUDA_CHECK(cudaMalloc((void**)&dev_subSequences, DIMX * DIMY * DIMZ * sizeof(size_t)));
 
+
   //this is where things start to become incredibly slow
   CUDA_CHECK(cudaMemcpy(dev_sequence, host_sequence, seq.size()*sizeof(char), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(dev_subSequenceLength, host_subSequenceLength, sizeof(unsigned), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(dev_searchedBound, host_searchedBound, sizeof(unsigned), cudaMemcpyHostToDevice));
 
+  gettimeofday(&end_time, NULL);
+  long bw1_time = (end_time.tv_sec*1000000+end_time.tv_usec) - (start_time.tv_sec*1000000+start_time.tv_usec);
+
   sumBases<<<1,block>>>(dev_sequence, dev_result, dev_subSequenceLength, dev_searchedBound, dev_subSequences, seq.size());
 
+  gettimeofday(&end_time, NULL);
+  long gpu_time = (end_time.tv_sec*1000000+end_time.tv_usec) - (start_time.tv_sec*1000000+start_time.tv_usec);
+  
   CUDA_CHECK(cudaMemcpy(host_result, dev_result, sizeof(unsigned), cudaMemcpyDeviceToHost));
+  
+  gettimeofday(&end_time, NULL);
+  long bw2_time = (end_time.tv_sec*1000000+end_time.tv_usec) - (start_time.tv_sec*1000000+start_time.tv_usec);
 
-
-  printf("Result: %u  Total Amount of chars in sequence: %zu\n", *host_result, seq.size());
+  printf("Result: %u \n", *host_result);
 
   CUDA_CHECK(cudaFree(dev_sequence));
   CUDA_CHECK(cudaFree(dev_result));
@@ -171,6 +189,17 @@ int main(int argc, char** argv){
   CUDA_CHECK(cudaFree(dev_subSequences));
   CUDA_CHECK(cudaFree(dev_searchedBound));
   free(host_result);
+
+  //total time
+  gettimeofday(&end_time, NULL);
+  delta_time = (end_time.tv_sec*1000000+end_time.tv_usec) - (start_time.tv_sec*1000000+start_time.tv_usec);
+
+
+  printf(" - %li µs elapsed total\n", delta_time);
+  printf(" - %li µs on bandwidth forth\n", bw1_time);
+  printf(" - %li µs on GPU\n", gpu_time - bw1_time);
+  printf(" - %li µs on bandwidth back\n", bw2_time - gpu_time);
+  printf(" - %li µs on CPU\n", delta_time - bw2_time);
 
   return 0;
 
