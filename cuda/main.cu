@@ -9,8 +9,8 @@
 #include <sys/time.h>
 
 #define DEBUG 1
-#define NGRID 512
-#define NBLOCK 65535
+#define NGRID 65535
+#define NBLOCK 256
 #define CUDA_CHECK(cmd) {cudaError_t error = cmd; if(error!=cudaSuccess){printf("<%s>:%i ",__FILE__,__LINE__); printf("[CUDA] Error: %s\n", cudaGetErrorString(error));}}
 
 
@@ -41,13 +41,12 @@ extern void clock_start(void);
 extern long clock_delta(void);
 */
 
-__global__ void k_iadd(unsigned *dest, char *sequence, unsigned seq_length)
+__global__ void k_iadd(unsigned *dest, unsigned res_length, char *sequence, unsigned seq_length)
 {
     for (unsigned id =  blockIdx.x*blockDim.x+threadIdx.x; 
-        id < seq_length; 
+        id < res_length; 
         id += blockDim.x*gridDim.x)
     {
-    
         unsigned result = 0;
         unsigned in_start = id << BASE_EXP;
 
@@ -56,7 +55,7 @@ __global__ void k_iadd(unsigned *dest, char *sequence, unsigned seq_length)
             for (unsigned i = in_start; i < in_start + BASE; i++)
             {
                 char nucleobase = sequence[i];
-                result += nucleobase != '-';
+                result += (nucleobase != '-');
             }
         }
 
@@ -64,20 +63,24 @@ __global__ void k_iadd(unsigned *dest, char *sequence, unsigned seq_length)
     }
 }
 
-__global__ void k_cadd(unsigned *buffer, unsigned doff, unsigned soff)
+__global__ void k_cadd(unsigned *buffer, unsigned res_length, unsigned doff, unsigned soff)
 {
     unsigned id = blockIdx.x*blockDim.x+threadIdx.x;
-    unsigned in_start = soff + (id << BASE_EXP);
-    unsigned out_pos = doff + id;
-    unsigned result = 0;
     
-    for (unsigned i = in_start; i < in_start + BASE; i++)
+    if (doff + id < res_length)
     {
-        unsigned value = buffer[i];
-        result += value;
-    }
+    	unsigned in_start = soff + (id << BASE_EXP);
+    	unsigned out_pos = doff + id;
+    	unsigned result = 0;
     
-    buffer[out_pos] = result;
+    	for (unsigned i = in_start; i < in_start + BASE; i++)
+    	{
+        	unsigned value = buffer[i];
+        	result += value;
+    	}
+    
+    	buffer[out_pos] = result;
+   	}
 }
 
 /**
@@ -150,12 +153,6 @@ int main(int argc, char *argv[])
 
     if (!sequence)
         return 1;
-//DEBUG
-    for (int i=0; i<seq_length; ++i)
-    {
-        printf("%c", sequence[i]);
-    }
-    printf("\n");
 
 
     seq_length--; // Cut final 0 byte
@@ -168,7 +165,7 @@ int main(int argc, char *argv[])
     for (long len = round_seq_length / BASE; len; len /= BASE)
         res_length += len;
 
-    printf("res_length: %d\n", res_length);
+    printf("seq_length %d, res_length: %d\n", seq_length, res_length);
 
     // Use some random index to be searched for here
     unsigned letter_index = seq_length / 2;
@@ -191,7 +188,7 @@ int main(int argc, char *argv[])
     // Copy the sequence to the video memory (or, generally speaking, the OpenCL device)
     CUDA_CHECK(cudaMalloc((void**)&result_gpu, res_length * sizeof(unsigned)));//result_gpu
     CUDA_CHECK(cudaMalloc((void**)&seq_gpu, seq_length*sizeof(char)));//seq_gpu
-    CUDA_CHECK(cudaMemcpy(seq_gpu, sequence, res_length * sizeof(char), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(seq_gpu, sequence, seq_length * sizeof(char), cudaMemcpyHostToDevice));
 
 #if DEBUG
     printf("GPU malloc and cpy finised\n");
@@ -214,14 +211,14 @@ int main(int argc, char *argv[])
     printf("k_iadd launching\n");
 #endif
 
-    k_iadd<<<grid1d,block1d>>>(result_gpu, seq_gpu, seq_length);
+    k_iadd<<<grid1d,block1d>>>(result_gpu, res_length, seq_gpu, seq_length);
 
 #if DEBUG
     printf("k_iadd finished\n");
 #endif
 
     CUDA_CHECK(cudaMemcpy(result, result_gpu, res_length * sizeof(unsigned), cudaMemcpyDeviceToHost));
-#if DEBUG
+#if 0
     printf("result back\n");
     for (int i = 0; i < res_length; i++)
     {
@@ -250,7 +247,7 @@ int main(int argc, char *argv[])
 #if DEBUG
     printf("k_cadd loop %d\n", kernels);
 #endif
-        k_cadd<<<grid1d,block1d>>>(result_gpu, output_offset, input_offset);
+        k_cadd<<<grid1d,block1d>>>(result_gpu, res_length, output_offset, input_offset);
         
         input_offset = output_offset;
         output_offset += kernels;
@@ -278,7 +275,7 @@ int main(int argc, char *argv[])
 
 
     // CPU intensive stuff goes here
-#if DEBUG
+#if 0
     printf("cpu part start\n");
     for (int i=0; i<res_length; ++i)
     {
